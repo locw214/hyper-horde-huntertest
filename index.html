@@ -1,1 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hyper Horde Hunter</title>
+    <style>
+        body { margin:0; padding:0; background:#0a001a; color:white; font-family:'Segoe UI',sans-serif; overflow:hidden; display:flex; justify-content:center; align-items:center; height:100vh; }
+        #gameContainer { position:relative; width:480px; height:890px; overflow:hidden; box-shadow:0 0 100px rgba(0,255,255,0.9); border:7px solid #00ffff; border-radius:25px; }
+        canvas { display:block; background:#000; }
 
+        #lobby, #levelSelect, #leaderboard { 
+            position:absolute; top:0; left:0; width:100%; height:100%; 
+            background:linear-gradient(135deg, #0f0022, #3a0055); 
+            display:flex; flex-direction:column; align-items:center; justify-content:center; 
+            z-index:100; gap:35px; 
+        }
+        #levelSelect, #leaderboard { display:none; }
+
+        h1 { font-size:56px; letter-spacing:4px; background:linear-gradient(90deg, #00ffff, #ff00ff, #ffff00); -webkit-background-clip:text; -webkit-text-fill-color:transparent; animation: neonGlow 1.5s infinite alternate; }
+        @keyframes neonGlow { from {text-shadow:0 0 30px #ff00ff;} to {text-shadow:0 0 60px #00ffff, 0 0 100px #ff00ff;} }
+
+        input, button, select { padding:18px 38px; font-size:23px; background:rgba(20,10,60,0.9); color:#00ffff; border:4px solid #00ffff; border-radius:20px; transition:0.4s; }
+        button:hover { background:#00ffff; color:#000; transform:scale(1.15); }
+
+        table { border-collapse:collapse; width:85%; color:white; }
+        th, td { padding:12px; text-align:center; border-bottom:1px solid #00ffff44; }
+        th { color:#00ffff; }
+
+        #ui { position:absolute; top:20px; left:20px; z-index:10; font-size:20px; }
+        #msg { position:absolute; top:40%; left:50%; transform:translate(-50%,-50%); font-size:52px; font-weight:bold; z-index:30; text-shadow:0 0 35px #0f0; display:none; }
+    </style>
+</head>
+<body>
+<div id="gameContainer">
+    <div id="lobby">
+        <h1>HYPER HORDE HUNTER</h1>
+        <input type="text" id="playerName" placeholder="Enter nickname" maxlength="12">
+        <button id="startBtn" onclick="startGame()" disabled>START GAME</button>
+        <button onclick="showLeaderboard()">LEADERBOARD</button>
+    </div>
+
+    <div id="levelSelect">
+        <h2 style="color:#ff00ff;">Choose Starting Level</h2>
+        <select id="levelChooser">
+            <option value="1">Level 1</option>
+            <option value="5">Level 5</option>
+            <option value="9">Level 9 - Boss 1</option>
+            <option value="12">Level 12 - Boss 2</option>
+            <option value="14">Level 14 - FINAL BOSS</option>
+        </select>
+        <button onclick="startWithSelectedLevel()">Start Selected Level</button>
+        <button onclick="hideLevelSelect()">Cancel</button>
+    </div>
+
+    <div id="leaderboard">
+        <h2 style="color:#ff00ff;">🏆 LEADERBOARD</h2>
+        <table id="leaderTable"></table>
+        <button onclick="hideLeaderboard()">Close</button>
+    </div>
+
+    <div id="ui">
+        Score: <span id="score">0</span><br>
+        Level: <span id="level">1</span><br>
+        Lives: <span id="hp">|||||</span>
+    </div>
+    <div id="msg"></div>
+    <canvas id="gameCanvas" width="480" height="890"></canvas>
+</div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let score = 0, level = 1, hp = 5;
+    let gameRunning = false;
+    let lastSpawn = 0, lastShot = 0, lastBossShot = 0;
+    let enemySpeed = 4.1, spawnRate = 520, fireRate = 135;
+    let weaponLevel = 1, playerSpeed = 9.5;
+    let bossesDefeated = 0;
+    let cheatInput = "";
+    let currentPlayerName = "Player";
+
+    const player = { x: 220, y: 780, w: 40, h: 50 };
+    let projectiles = [], enemies = [], particles = [], powerups = [], boss = null;
+    const keys = {};
+    let stars = [];
+    let leaderboard = [];
+
+    // Загрузка рекордов
+    try { 
+        leaderboard = JSON.parse(localStorage.getItem('hyperHordeLB')) || []; 
+    } catch(e){}
+
+    function saveLeaderboard() {
+        try { 
+            localStorage.setItem('hyperHordeLB', JSON.stringify(leaderboard)); 
+        } catch(e){}
+    }
+
+    function updateLeaderboardTable() {
+        let html = `<tr><th>#</th><th>Player</th><th>Score</th><th>Date</th></tr>`;
+        leaderboard.slice(0, 15).forEach((entry, i) => {
+            const date = new Date(entry.date).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+            html += `<tr><td>${i+1}</td><td>${entry.name}</td><td>${entry.score}</td><td>${date}</td></tr>`;
+        });
+        document.getElementById('leaderTable').innerHTML = html || "<tr><td colspan='4'>No records yet</td></tr>";
+    }
+
+    function showLeaderboard() { 
+        updateLeaderboardTable(); 
+        document.getElementById('leaderboard').style.display = 'flex'; 
+    }
+    function hideLeaderboard() { 
+        document.getElementById('leaderboard').style.display = 'none'; 
+    }
+
+    function createStars() {
+        stars = [];
+        for(let i = 0; i < 150; i++) stars.push({x: Math.random()*480, y: Math.random()*890, size: Math.random()*3 + 0.8, speed: Math.random()*1.5 + 0.7});
+    }
+
+    class Particle {
+        constructor(x, y, color) { this.x = x; this.y = y; this.size = Math.random()*8+3; this.speedX = (Math.random()-0.5)*15; this.speedY = (Math.random()-0.5)*15; this.life = 1; this.color = color; }
+        update() { this.x += this.speedX; this.y += this.speedY; this.life -= 0.04; }
+        draw() { ctx.fillStyle = `rgba(${this.color},${this.life})`; ctx.fillRect(this.x, this.y, this.size, this.size); }
+    }
+
+    function createExplosion(x, y, color, count = 35) {
+        count = Math.max(8, Math.floor(count));
+        for(let i = 0; i < count; i++) particles.push(new Particle(x, y, color));
+    }
+
+    function getEnemyHP() {
+        return 2 + Math.floor((level - 1) / 5);
+    }
+
+    function spawnEnemy() {
+        if (boss) return;
+        const size = 32 + Math.random() * 24;
+        enemies.push({ x: Math.random() * (canvas.width - size), y: -50, size, hp: getEnemyHP(), speed: enemySpeed * (0.9 + Math.random()*0.5), hitSize: size + 16 });
+    }
+
+    function spawnPowerup() {
+        powerups.push({ x: Math.random()*(canvas.width-40), y: -40, size: 34, speed: 2.6 });
+    }
+
+    function shoot() {
+        const now = Date.now();
+        if (now - lastShot < fireRate) return;
+        lastShot = now;
+        const px = player.x + 20;
+        projectiles.push({x: px-8, y: player.y, vy: -22});
+        projectiles.push({x: px+8, y: player.y, vy: -22});
+        if (weaponLevel >= 2) projectiles.push({x: px, y: player.y-3, vy: -23});
+        if (weaponLevel >= 3) {
+            projectiles.push({x: px-18, y: player.y+6, vy: -21});
+            projectiles.push({x: px+18, y: player.y+6, vy: -21});
+        }
+        if (weaponLevel >= 4) {
+            projectiles.push({x: px-27, y: player.y+10, vy: -20.5});
+            projectiles.push({x: px+27, y: player.y+10, vy: -20.5});
+        }
+    }
+
+    function spawnBoss() {
+        if (boss) return;
+        let t = bossesDefeated;
+        let hp = t === 0 ? 100 : t === 1 ? 160 : 240;
+        let bullets = t === 0 ? 3 : t === 1 ? 4 : 5;
+        let speed = t === 2 ? 4.7 : t === 1 ? 4.1 : 3.5;
+        let w = t === 2 ? 195 : t === 1 ? 182 : 170;
+        boss = { x: 115, y: 65, w: w, h: 92, hp: hp, maxHp: hp, speed: speed, changeTimer: Date.now(), bullets: bullets, type: t };
+    }
+
+    function startGame() {
+        currentPlayerName = document.getElementById('playerName').value.trim() || "Player";
+        resetGame(1);
+    }
+
+    function startWithSelectedLevel() {
+        const lvl = parseInt(document.getElementById('levelChooser').value);
+        currentPlayerName = document.getElementById('playerName').value.trim() || "Player";
+        resetGame(lvl);
+    }
+
+    function resetGame(startLevel) {
+        level = startLevel;
+        score = startLevel * 8;
+        hp = 5;
+        weaponLevel = startLevel >= 160 ? 4 : startLevel >= 90 ? 3 : startLevel >= 30 ? 2 : 1;
+        bossesDefeated = startLevel >= 14 ? 2 : startLevel >= 12 ? 1 : 0;
+        enemySpeed = 4.1; spawnRate = 520; fireRate = 135;
+        projectiles = []; enemies = []; particles = []; powerups = []; boss = null;
+        document.getElementById('level').innerText = level;
+        document.getElementById('score').innerText = score;
+        document.getElementById('hp').innerText = "|".repeat(hp);
+        createStars();
+        gameRunning = true;
+        document.getElementById('lobby').style.display = 'none';
+        document.getElementById('levelSelect').style.display = 'none';
+        lastSpawn = Date.now() - 300;
+    }
+
+    function endGame() {
+        gameRunning = false;
+        if (score > 0) {
+            leaderboard.push({ name: currentPlayerName, score: score, date: Date.now() });
+            leaderboard.sort((a,b) => b.score - a.score);
+            saveLeaderboard();
+        }
+        setTimeout(() => document.getElementById('lobby').style.display = 'flex', 800);
+    }
+
+    function showMessage(text, color = "#00ff88") {
+        const msg = document.getElementById('msg');
+        msg.style.color = color; msg.innerHTML = text; msg.style.display = 'block';
+        setTimeout(() => msg.style.display = 'none', 1600);
+    }
+
+    function showLevelSelect() { document.getElementById('levelSelect').style.display = 'flex'; }
+    function hideLevelSelect() { document.getElementById('levelSelect').style.display = 'none'; }
+
+    function update() {
+        if (!gameRunning) return requestAnimationFrame(update);
+
+        if (keys['ArrowLeft'] && player.x > 5) player.x -= playerSpeed;
+        if (keys['ArrowRight'] && player.x < 435) player.x += playerSpeed;
+        if (keys['Space']) shoot();
+
+        if (score >= level * 9) {
+            level++;
+            document.getElementById('level').innerText = level;
+            enemySpeed += 0.3;
+            spawnRate = Math.max(280, spawnRate - 25);
+            showMessage("LEVEL UP!", "#ffff00");
+        }
+
+        if (Date.now() - lastSpawn > spawnRate && !boss) { spawnEnemy(); lastSpawn = Date.now(); }
+        if (Math.random() < 0.015) spawnPowerup();
+
+        if (score >= 30 && weaponLevel === 1) { weaponLevel = 2; showMessage("WEAPON LEVEL 2"); }
+        if (score >= 90 && weaponLevel === 2) { weaponLevel = 3; showMessage("WEAPON LEVEL 3"); }
+        if (score >= 160 && weaponLevel === 3) { weaponLevel = 4; showMessage("MAX WEAPON!"); }
+
+        if (!boss) {
+            if (score >= 180 && bossesDefeated < 2) spawnBoss();
+            else if (score >= 110 && bossesDefeated < 1) spawnBoss();
+            else if (score >= 40 && bossesDefeated === 0) spawnBoss();
+        }
+
+        stars.forEach(s => { s.y += s.speed; if (s.y > 890) s.y = -5; });
+
+        if (boss) {
+            if (Date.now() - boss.changeTimer > 600 + Math.random()*700) {
+                boss.speed = (Math.random() - 0.5) * (boss.type === 2 ? 8 : 7);
+                boss.y = 50 + Math.random() * 220;
+                boss.changeTimer = Date.now();
+            }
+            boss.x += boss.speed;
+            if (boss.x < 30 || boss.x > canvas.width - boss.w - 30) boss.speed *= -1;
+        }
+
+        // ... (вся игровая логика projectiles, enemies, boss, powerups, particles остаётся без изменений)
+        for (let i = projectiles.length-1; i >= 0; i--) {
+            projectiles[i].y += projectiles[i].vy || 7;
+            if (projectiles[i].y < -30 || projectiles[i].y > canvas.height + 30) projectiles.splice(i,1);
+        }
+
+        for (let i = enemies.length-1; i >= 0; i--) {
+            let e = enemies[i];
+            e.y += e.speed;
+            if (e.y > canvas.height) {
+                hp--;
+                document.getElementById('hp').innerText = "|".repeat(hp);
+                createExplosion(e.x + e.size/2, canvas.height-40, "255,60,60");
+                enemies.splice(i,1);
+                if (hp <= 0) endGame();
+                continue;
+            }
+            for (let j = projectiles.length-1; j >= 0; j--) {
+                let p = projectiles[j];
+                if (!p.isBossBullet && p.x > e.x - 8 && p.x < e.x + e.hitSize && p.y > e.y - 8 && p.y < e.y + e.hitSize) {
+                    e.hp--; projectiles.splice(j,1);
+                    if (e.hp <= 0) {
+                        createExplosion(e.x + e.size/2, e.y + e.size/2, "255,180,50", 45);
+                        enemies.splice(i,1);
+                        score += 1;
+                        document.getElementById('score').innerText = score;
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (boss) {
+            if (Date.now() - lastBossShot > 680) {
+                lastBossShot = Date.now();
+                const bx = boss.x + boss.w / 2;
+                for (let i = 0; i < boss.bullets; i++) {
+                    const offset = (i - (boss.bullets-1)/2) * 17;
+                    projectiles.push({x: bx + offset, y: boss.y + boss.h, vy: 7.2, isBossBullet: true});
+                }
+            }
+            for (let j = projectiles.length-1; j >= 0; j--) {
+                let p = projectiles[j];
+                if (!p.isBossBullet && p.x > boss.x && p.x < boss.x + boss.w && p.y > boss.y && p.y < boss.y + boss.h) {
+                    boss.hp--; projectiles.splice(j,1);
+                    if (boss.hp <= 0) {
+                        createExplosion(boss.x + boss.w/2, boss.y + boss.h/2, "255,215,0", 130);
+                        score += 60;
+                        bossesDefeated++;
+                        boss = null;
+                        document.getElementById('score').innerText = score;
+                        enemies.forEach(e => e.hp = getEnemyHP());
+                    }
+                    break;
+                }
+            }
+        }
+
+        for (let i = projectiles.length-1; i >= 0; i--) {
+            let p = projectiles[i];
+            if (p.isBossBullet && p.x > player.x - 15 && p.x < player.x + player.w + 15 && p.y > player.y && p.y < player.y + player.h) {
+                hp--;
+                document.getElementById('hp').innerText = "|".repeat(hp);
+                createExplosion(player.x + 20, player.y + 25, "255,50,50", 35);
+                projectiles.splice(i,1);
+                if (hp <= 0) endGame();
+            }
+        }
+
+        for (let i = powerups.length-1; i >= 0; i--) {
+            let p = powerups[i];
+            p.y += p.speed;
+            if (p.y > canvas.height) { powerups.splice(i,1); continue; }
+            if (p.x < player.x + player.w && p.x + p.size > player.x && p.y < player.y + player.h && p.y + p.size > player.y) {
+                if (hp < 7) {
+                    hp++;
+                    document.getElementById('hp').innerText = "|".repeat(hp);
+                    showMessage("+1 LIFE", "#00ff88");
+                    createExplosion(p.x+17, p.y+17, "0,255,140");
+                }
+                powerups.splice(i,1);
+            }
+        }
+
+        for (let i = particles.length-1; i >= 0; i--) {
+            particles[i].update();
+            if (particles[i].life <= 0) particles.splice(i,1);
+        }
+
+        draw();
+        requestAnimationFrame(update);
+    }
+
+    function draw() {
+        ctx.fillStyle = 'rgba(5,5,5,0.42)';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle = "#fff";
+        stars.forEach(s => ctx.fillRect(s.x, s.y, s.size, s.size));
+
+        ctx.shadowBlur = 35; ctx.shadowColor = "#00ffff";
+        ctx.fillStyle = "#00ffff";
+        ctx.beginPath();
+        ctx.moveTo(player.x+20, player.y);
+        ctx.lineTo(player.x, player.y+48);
+        ctx.lineTo(player.x+40, player.y+48);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        ctx.shadowBlur = 20; ctx.shadowColor = "#ffff00";
+        ctx.fillStyle = "#ffff00";
+        projectiles.forEach(p => ctx.fillRect(p.x-3, p.y, 6, 26));
+        ctx.shadowBlur = 0;
+
+        ctx.shadowBlur = 24; ctx.shadowColor = "#ff3366";
+        enemies.forEach(e => {
+            ctx.fillStyle = `rgb(255, ${70 + e.hp*45}, 80)`;
+            ctx.fillRect(e.x, e.y, e.size, e.size);
+        });
+        ctx.shadowBlur = 0;
+
+        ctx.shadowBlur = 22; ctx.shadowColor = "#ff0088";
+        powerups.forEach(p => {
+            ctx.fillStyle = "#ff0088";
+            ctx.fillRect(p.x + 4, p.y + 4, p.size-8, p.size-8);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 30px Arial";
+            ctx.fillText("♥", p.x + 6, p.y + 31);
+        });
+        ctx.shadowBlur = 0;
+
+        if (boss) {
+            let color = boss.type === 2 ? "#ff00aa" : boss.type === 1 ? "#aa00ff" : "#ff3366";
+            ctx.shadowBlur = 65; ctx.shadowColor = color;
+            ctx.fillStyle = "#660022";
+            ctx.fillRect(boss.x, boss.y, boss.w, boss.h);
+            ctx.shadowBlur = 40; ctx.shadowColor = "#ff88ff";
+            ctx.fillStyle = "#ff55bb";
+            ctx.fillRect(boss.x + 30, boss.y + 20, boss.w - 60, 35);
+
+            const barW = boss.w * (boss.hp / boss.maxHp);
+            ctx.fillStyle = "rgba(0,0,0,0.75)";
+            ctx.fillRect(boss.x, boss.y - 35, boss.w, 18);
+            ctx.fillStyle = boss.hp > 70 ? "#00ffaa" : "#ff3333";
+            ctx.fillRect(boss.x, boss.y - 35, barW, 18);
+        }
+        particles.forEach(p => p.draw());
+    }
+
+    window.addEventListener('keydown', e => {
+        keys[e.code] = true;
+        if (e.key) {
+            cheatInput += e.key.toLowerCase();
+            if (cheatInput.length > 15) cheatInput = cheatInput.slice(-15);
+            if (cheatInput.includes("idi")) {
+                showLevelSelect();
+                cheatInput = "";
+            }
+        }
+    });
+
+    window.addEventListener('keyup', e => keys[e.code] = false);
+
+    const nameInput = document.getElementById('playerName');
+    const startBtn = document.getElementById('startBtn');
+    nameInput.addEventListener('input', () => startBtn.disabled = nameInput.value.trim().length < 1);
+
+    requestAnimationFrame(update);
+    createStars();
+</script>
+</body>
+</html>
